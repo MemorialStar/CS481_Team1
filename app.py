@@ -2,7 +2,10 @@ import dash
 from dash import dcc
 from dash import html
 from dash.dependencies import Input, Output, State, MATCH, ALL
+from dash.exceptions import PreventUpdate
 import plotly.express as px
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
 import pandas as pd
 import dash_bootstrap_components as dbc
 import re
@@ -29,10 +32,24 @@ CONTENT_STYLE = {
 df = pd.read_excel('Real_Data.xlsx')
 ##################################################
 
+# all selected dataframe
+########
+show_df=df
+########
+
 # masked dataframe
 ########
 masked=pd.DataFrame()
 ########
+
+# dataframes to mask
+########
+to_mask_app=pd.DataFrame()
+to_mask_location=pd.DataFrame()
+to_mask_contact=pd.DataFrame()
+placeholder=html.P(id='placeholder', style={})
+########
+
 
 # make timetable
 def get_cat(col):
@@ -46,7 +63,6 @@ def get_cat(col):
     return "Other"
 
 def make_timetable(df):
-
     E_agg=pd.DataFrame()
     E_agg['App History']=df['name'].apply(lambda x: False if (x==False) else True) | df['totaltime'].apply(lambda x: False if (x==0) else True)
     E_agg['Location']=df['longitude'].apply(lambda x: False if (x==0) else True) | df["latitude"].apply(lambda x: False if (x==0) else True)
@@ -180,13 +196,12 @@ breakdown_list, breakdown_fig=make_breakdown(df)
 collection_breakdown=html.Div(id='collection-breakdown', children=breakdown_list, style=CONTENT_STYLE)
 collection_breakdown_fig=dcc.Graph(id='collection-breakdown-fig', figure=breakdown_fig)
 
-def make_summary(df, starttime, endtime):
-    df=df.reset_index(drop=True)
+def make_summary(df, whole_df, starttime, endtime):
     datatypes=[]
     starts=[]
     finishes=[]
     categories=[]
-
+    global to_mask_app, to_mask_location, to_mask_contact
     for col in df.columns:
       if col!='index' and col!='timestamp' and col!='DateTime' and col!='level_0' and col!='Day':
         start=-1
@@ -219,7 +234,6 @@ def make_summary(df, starttime, endtime):
     E_time['Start']=starts
     E_time['Finish']=finishes
     E_time['Category']=categories
-
     sums=[]
     for i in list(set(categories)):
         if i=='App History':
@@ -228,6 +242,10 @@ def make_summary(df, starttime, endtime):
             sums.append(html.Br())
             sums.append("When this type of data is collected, if and when you installed a new app, and when and which app you updated is known.")
             sums.append(html.Br())
+            sums.append(html.Button('Mask', id='mask-app', n_clicks=0))
+            mask_df=df[(df['name']!=False) | (df['totaltime']!=0)].reset_index(drop=True)
+            to_mask_app=whole_df.merge(mask_df, how='outer', indicator=True).query('_merge == "both"').drop('_merge', 1).reset_index(drop=True)
+
             # added line for clarity
             sums.append(html.Hr(style={'color':'white'}))
         if i=='Location':
@@ -236,6 +254,9 @@ def make_summary(df, starttime, endtime):
             sums.append(html.Br())
             sums.append("When this type of data is collected, where you are, how high you are from the ground, and how fast you are moving is known.")
             sums.append(html.Br())
+            sums.append(html.Button('Mask', id='mask-location', n_clicks=0))
+            mask_df=df[(df['longitude']!=0) | (df['latitude']!=0)].reset_index(drop=True)
+            to_mask_location=whole_df.merge(mask_df, how='outer', indicator=True).query('_merge == "both"').drop('_merge', 1).reset_index(drop=True)
             # added line for clarity
             sums.append(html.Hr(style={'color':'white'}))
         if i=='Contact':
@@ -244,6 +265,9 @@ def make_summary(df, starttime, endtime):
             sums.append(html.Br())
             sums.append("When this type of data is collected, the contact information of your correspondent, whether you pinned a message, the number of times you contacted a person, and whether the person is marked as important is known.")
             sums.append(html.Br())
+            sums.append(html.Button('Mask', id='mask-contact', n_clicks=0))
+            mask_df=df[(df['call']!=False) | (df['message']!=False)].reset_index(drop=True)
+            to_mask_contact=whole_df.merge(mask_df, how='outer', indicator=True).query('_merge == "both"').drop('_merge', 1).reset_index(drop=True)
             # added line for clarity
             sums.append(html.Hr(style={'color':'white'}))
 
@@ -253,7 +277,7 @@ def make_summary(df, starttime, endtime):
 
     #return html.Div([html.P(['Collected Data in ', html.Br(), (starttime.strftime("%H:%M")+"~"+endtime.strftime("%H:%M")+","), html.Br(), starttime.strftime("%Y-%m-%d"), html.Br()], style={'font-size': '24px'}), html.P(sums, style={'font-size': '18px'})])
 
-summary=html.Div(children=make_summary(df, df['DateTime'].iat[0], df['DateTime'].iat[-1]), id='summary')
+summary=html.Div(children=make_summary(df, df, df['DateTime'].iat[0], df['DateTime'].iat[-1]), id='summary')
 
 @app.callback(
     Output("summary", "children", allow_duplicate=True),
@@ -270,7 +294,7 @@ def update_summary(clickData):
     select_start = datetime.datetime.strptime(clickData['points'][0]['base'].split('.')[0], '%Y-%m-%dT%H:%M:%S')
     cat_df=df[(cats[select_cat])]
     selected_df=cat_df.loc[(cat_df['DateTime']>select_start) & (cat_df['DateTime']<select_end)].reset_index()
-    return make_summary(selected_df, select_start, select_end)
+    return make_summary(selected_df, df, select_start, select_end)
 ##################################################
 
 
@@ -308,78 +332,191 @@ def filter_dataframe(date):
         # Filter dataframe by selected date
         filtered_df = df[df['DateTime'].dt.floor('1d') == pd.to_datetime(date).floor('1d')]
     filtered_df=filtered_df.reset_index(drop=True)
+    global show_df, masked
+    show_df=filtered_df
     return filtered_df
 
 # update timetable
 @app.callback(Output('timetable', 'figure'),
               [Input('date-picker', 'date')])
 def update_timetable(date):
-    cur_df=filter_dataframe(date)
-    fig=make_timetable(cur_df)
+    filtered_df=filter_dataframe(date)
+    global show_df, masked
+    if len(masked)>0:
+        filtered_df=show_df.merge(masked, how='outer', indicator=True).query('_merge == "left_only"').drop('_merge', 1).reset_index(drop=True)
+    fig=make_timetable(filtered_df)
     return fig
 def update_summary_date(date):
     filtered_df = filter_dataframe(date)
-    return make_summary(filtered_df, filtered_df['DateTime'].iat[0], filtered_df['DateTime'].iat[-1])
+    global show_df, masked
+    if len(masked)>0:
+        filtered_df=show_df.merge(masked, how='outer', indicator=True).query('_merge == "left_only"').drop('_merge', 1).reset_index(drop=True)
+    return make_summary(filtered_df, filtered_df, filtered_df['DateTime'].iat[0], filtered_df['DateTime'].iat[-1])
 
 @app.callback(Output('collection-breakdown', 'children'),
               [Input('date-picker', 'date')])
 def update_breakdown(date):
     filtered_df = filter_dataframe(date)
+    global show_df, masked
+    if len(masked)>0:
+        filtered_df=show_df.merge(masked, how='outer', indicator=True).query('_merge == "left_only"').drop('_merge', 1).reset_index(drop=True)
     breakdown_list, breakdown_fig=make_breakdown(filtered_df)
     return breakdown_list
 @app.callback(Output('collection-breakdown-fig', 'figure'),
               [Input('date-picker', 'date')])
 def update_breakdown(date):
     filtered_df = filter_dataframe(date)
+    global show_df, masked
+    if len(masked)>0:
+        filtered_df=show_df.merge(masked, how='outer', indicator=True).query('_merge == "left_only"').drop('_merge', 1).reset_index(drop=True)
     breakdown_list, breakdown_fig=make_breakdown(filtered_df)
     return breakdown_fig
 
 
 #################################################
 
+# mask button functionality
+##################################################
+@app.callback(Output('placeholder', 'style', allow_duplicate=True),
+              [Input('mask-app', 'n_clicks')],
+              prevent_initial_call=True)
+def mask_app_set(n_clicks):
+    if n_clicks==0:
+        raise PreventUpdate
+    else:
+        global show_df, masked, to_mask_app
+        masked=masked.append(to_mask_app, ignore_index = True).reset_index(drop=True)
+    return {'font-size': '18px'}
+
+@app.callback(Output('placeholder', 'style', allow_duplicate=True),
+              [Input('mask-location', 'n_clicks')],
+              prevent_initial_call=True)
+def mask_location_set(n_clicks):
+    if n_clicks==0:
+        raise PreventUpdate
+    else:
+        global show_df, masked, to_mask_location
+        masked=masked.append(to_mask_location, ignore_index = True).reset_index(drop=True)
+    return {'font-size': '18px'}
+
+@app.callback(Output('placeholder', 'style', allow_duplicate=True),
+              [Input('mask-contact', 'n_clicks')],
+              prevent_initial_call=True)
+def mask_contact_set(n_clicks):
+    if n_clicks==0:
+        raise PreventUpdate
+    else:
+        global show_df, masked, to_mask_contact
+        masked=masked.append(to_mask_contact, ignore_index = True).reset_index(drop=True)
+    return {'font-size': '18px'}
 
 
-# create sidebar
+
+
+
+@app.callback(Output('timetable', 'figure', allow_duplicate=True),
+              [Input('placeholder', 'style')],
+              prevent_initial_call=True)
+def mask_timetable(style):
+    if style == {}:
+        raise PreventUpdate
+    else:
+        global show_df, masked
+        filtered_df=show_df
+        if len(masked)>0:
+            filtered_df=show_df.merge(masked, how='outer', indicator=True).query('_merge == "left_only"').drop('_merge', 1).reset_index(drop=True)
+        fig=make_timetable(filtered_df)
+        return fig
+def mask_summary_date(style):
+    if style == {}:
+        raise PreventUpdate 
+    else:
+        global show_df, masked
+        filtered_df=show_df
+        if len(masked)>0:
+            filtered_df=show_df.merge(masked, how='outer', indicator=True).query('_merge == "left_only"').drop('_merge', 1).reset_index(drop=True)
+        return make_summary(filtered_df, filtered_df, filtered_df['DateTime'].iat[0], filtered_df['DateTime'].iat[-1])
+
+@app.callback(Output('collection-breakdown', 'children', allow_duplicate=True),
+              [Input('placeholder', 'style')],
+              prevent_initial_call=True)
+def mask_breakdown(style):
+    if style == {}:
+        raise PreventUpdate
+    else:
+        global show_df, masked
+        filtered_df=show_df
+        if len(masked)>0:
+            filtered_df=show_df.merge(masked, how='outer', indicator=True).query('_merge == "left_only"').drop('_merge', 1).reset_index(drop=True)
+        breakdown_list, breakdown_fig=make_breakdown(filtered_df)
+        return breakdown_list
+@app.callback(Output('collection-breakdown-fig', 'figure', allow_duplicate=True),
+              [Input('placeholder', 'style')],
+              prevent_initial_call=True)
+def mask_breakdown(style):
+    if style == {}:
+        raise PreventUpdate
+    else:
+        global show_df, masked
+        filtered_df=show_df
+        if len(masked)>0:
+            filtered_df=show_df.merge(masked, how='outer', indicator=True).query('_merge == "left_only"').drop('_merge', 1).reset_index(drop=True)
+        breakdown_list, breakdown_fig=make_breakdown(filtered_df)
+        return breakdown_fig
+
 #################################################
 
-# the style arguments for the sidebar. We use position:fixed and a fixed width
-# SIDEBAR_STYLE = {
-#     "position": "fixed",
-#     "top": 0,
-#     "left": 0,
-#     "bottom": 0,
-#     "width": "25%",
-#     "padding": "2rem 1rem",
-#     "background-color": "#f8f9fa",
-#     "overflow-y": "scroll"
-# }
-
-# sidebar = html.Div(
-#     [
-#         html.H3("Date Selection"),
-#         html.Div([calendarUI], style=calendar_style),
-#         html.Hr(),
-#         summary
-#     ],
-#     style=SIDEBAR_STYLE,
-# )
 
 
 
-# content = html.Div([
-#             html.Header(
-#                 [
-#                     html.H1("Team 1 DP5 Prototype")
-#                 ], style=CONTENT_STYLE
-#             ),
-#             html.Div([timetable], style=CONTENT_STYLE),
-#             collection_breakdown,
-#             html.Div([collection_breakdown_fig], style=CONTENT_STYLE),
-#         ], style={"overflow-y": "scroll"})
+# make reset button
+#################################################
+reset_button=html.Button('Reset Masks', id='reset_button', n_clicks=0)
 
-# app.layout = html.Div([
-#                 html.Div([sidebar, content])
-#             ])
+
+@app.callback(Output('timetable', 'figure', allow_duplicate=True),
+              [Input('reset_button', 'n_clicks')],
+              prevent_initial_call=True)
+def reset_timetable(n_clicks):
+    global show_df, masked
+    filtered_df=show_df
+    masked=pd.DataFrame()
+    if len(masked)>0:
+        filtered_df=show_df.merge(masked, how='outer', indicator=True).query('_merge == "left_only"').drop('_merge', 1).reset_index(drop=True)
+    fig=make_timetable(filtered_df)
+    return fig
+def reset_summary_date(n_clicks):
+    global show_df, masked
+    filtered_df=show_df
+    masked=pd.DataFrame()
+    if len(masked)>0:
+        filtered_df=show_df.merge(masked, how='outer', indicator=True).query('_merge == "left_only"').drop('_merge', 1).reset_index(drop=True)
+    return make_summary(filtered_df, filtered_df, filtered_df['DateTime'].iat[0], filtered_df['DateTime'].iat[-1])
+
+@app.callback(Output('collection-breakdown', 'children', allow_duplicate=True),
+              [Input('reset_button', 'n_clicks')],
+              prevent_initial_call=True)
+def reset_breakdown(n_clicks):
+    global show_df, masked
+    filtered_df=show_df
+    masked=pd.DataFrame()
+    if len(masked)>0:
+        filtered_df=show_df.merge(masked, how='outer', indicator=True).query('_merge == "left_only"').drop('_merge', 1).reset_index(drop=True)
+    breakdown_list, breakdown_fig=make_breakdown(filtered_df)
+    return breakdown_list
+@app.callback(Output('collection-breakdown-fig', 'figure', allow_duplicate=True),
+              [Input('reset_button', 'n_clicks')],
+              prevent_initial_call=True)
+def reset_breakdown(n_clicks):
+    global show_df, masked
+    filtered_df=show_df
+    masked=pd.DataFrame()
+    if len(masked)>0:
+        filtered_df=show_df.merge(masked, how='outer', indicator=True).query('_merge == "left_only"').drop('_merge', 1).reset_index(drop=True)
+    breakdown_list, breakdown_fig=make_breakdown(filtered_df)
+    return breakdown_fig
+#################################################
+
 
 # the style arguments for the sidebar. We use position:fixed and a fixed width
 # changed color
@@ -399,6 +536,7 @@ sidebar = html.Div(
        # added some font styles
         html.H3("Date Selection", style={"color":"#FFFFFF", "margin-bottom":"12px", "font-family":"Proxima Nova"}), 
         html.Div([calendarUI], style=calendar_style),
+        html.Div([reset_button]),
         html.Hr(style={"color":"#FFFFFF"}),
         summary
     ],
@@ -411,7 +549,7 @@ content = html.Div([
             html.Header(
                 [
                    # added some font styles
-                    html.H1("Team 1 DP5 Prototype", style={'font-family':'Proxima Nova', 'margin-top':'20px'})
+                    html.H1("Cognito.Inc", style={'font-family':'Proxima Nova', 'margin-top':'20px'})
                 ], style=CONTENT_STYLE
             ),
             html.Div([timetable], style=CONTENT_STYLE),
@@ -420,7 +558,8 @@ content = html.Div([
         ], style={"overflow-y": "scroll"})
 
 app.layout = html.Div([
-                html.Div([sidebar, content])
+                html.Div([sidebar, content]),
+                placeholder
             ])
 
 
