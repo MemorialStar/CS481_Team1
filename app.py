@@ -559,7 +559,7 @@ content = html.Div([
 
 app.layout = html.Div([
                 html.Div([sidebar, content]),
-                placeholder
+                placeholder,
             ])
 
 
